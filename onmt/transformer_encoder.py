@@ -1,5 +1,6 @@
 """Base class for encoders and generic multi encoders."""
 
+import torch
 import torch.nn as nn
 import onmt
 from utils.misc import aeq
@@ -49,31 +50,38 @@ class TransformerEncoder(nn.Module):
        for _ in range(num_layers)])
     # 6层结束有layer_norm
     self.layer_norm = nn.LayerNorm(d_model, eps=1e-6)
+    pad_token = self.embeddings.tokenizer.pad_token
+    self.padding_idx = self.embeddings.tokenizer.convert_tokens_to_ids(pad_token)
+    self.linear_layer = nn.Linear(1024, 512)
+    self.act = nn.Tanh()
 
   def _check_args(self, src, lengths=None):
-    _, n_batch = src.size()
+    n_batch, _ = src.size()
     if lengths is not None:
       n_batch_, = lengths.size()
       aeq(n_batch, n_batch_)
 
   def forward(self, src, lengths=None):
     """ See :obj:`EncoderBase.forward()`"""
+    # src: (B, T)
     self._check_args(src, lengths)
 
-    # (seq_len, batch_size, dim)
-    emb = self.embeddings(src)
+    attn_mask = (~src.data.eq(self.padding_idx)).to(torch.long)
+    emb = self.embeddings(input_ids=src,attention_mask=attn_mask)
+    # (B, T, 1024), 已经有位置信息
+    emb = emb.last_hidden_state
+    emb = self.act(self.linear_layer(emb))
+    out = emb
 
     # (batch_size, seq_len, dim)
-    out = emb.transpose(0, 1).contiguous()
+    # out = emb.transpose(0, 1).contiguous()
     # (batch_size, seq_len)
-    words = src.transpose(0, 1)
-    padding_idx = self.embeddings.word_padding_idx
-    mask = words.data.eq(padding_idx).unsqueeze(1)  # [B, 1, T]
+    mask = src.data.eq(self.padding_idx).unsqueeze(1)  # [B, 1, T]
     # Run the forward pass of every layer of the tranformer.
     for i in range(self.num_layers):
       out = self.transformer[i](out, mask)
     out = self.layer_norm(out)
 
     # (seq_len, batch_size, dim), (seq_len, batch_size, dim), batch_size
-    return emb, out.transpose(0, 1).contiguous(), lengths
+    return emb, out, lengths
 

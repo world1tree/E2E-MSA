@@ -49,9 +49,10 @@ class TransformerDecoderLayer(nn.Module):
       # 除了padding之外，还需要把上三角抹掉，因为tgt注意力不可见
       # tgt_pad_mask: [B, 1, T_tgt], 1扩展会重复后面维度的内容
       # self.mask: [1, T_tgt, T_tgt]
-      dec_mask = torch.gt(tgt_pad_mask +
-                          self.mask[:, :tgt_pad_mask.size(-1),
-                                    :tgt_pad_mask.size(-1)], 0)
+      dec_mask = torch.gt(tgt_pad_mask, 0)
+      # dec_mask = torch.gt(tgt_pad_mask +
+      #                     self.mask[:, :tgt_pad_mask.size(-1),
+      #                               :tgt_pad_mask.size(-1)], 0)
 
     # 在inference阶段tgt只有一个单词，为什么self-attn不需要tgt_pad_mask和feature_mask
     # 因为可以确保当前没有padding, 不需要feature_mask是因为根本没有feature的注意力
@@ -109,6 +110,8 @@ class TransformerDecoder(nn.Module):
     self.decoder_type = 'transformer'
     self.num_layers = num_layers
     self.embeddings = embeddings
+    pad_token = self.embeddings.tokenizer.pad_token
+    self.padding_idx = self.embeddings.tokenizer.convert_tokens_to_ids(pad_token)
 
     # Decoder State
     self.state = {}
@@ -119,6 +122,9 @@ class TransformerDecoder(nn.Module):
        for _ in range(num_layers)])
 
     self.layer_norm = nn.LayerNorm(d_model, eps=1e-6)
+
+    self.linear_layer = nn.Linear(1024, 512)
+    self.act = nn.Tanh()
 
   def init_state(self, src, src_enc):
     """ Init decoder state """
@@ -161,31 +167,22 @@ class TransformerDecoder(nn.Module):
       # TODO: 为什么不全部设置成<bos_id>?
       self._init_cache(self.num_layers)
 
-    # (seq_len, batch_size), 仅仅为了通过src获取src_pad_mask用于context-attn
     src = self.state["src"]
-    # encoder_output: (seq_len, batch_size, dim)
-    memory_bank = self.state["src_enc"]
-    # (batch_size, seq_len)
-    src_words = src.transpose(0, 1)
-    # (batch_size, seq_len-1)
-    tgt_words = tgt.transpose(0, 1)
+    src_memory_bank = self.state["src_enc"]
 
     # Initialize return variables.
     attns = {"std": []}
 
-    # Run the forward pass of the TransformerDecoder.
-    emb = self.embeddings(tgt, step=step)
-    assert emb.dim() == 3  # len x batch x embedding_dim
+    attn_mask = (~tgt.data.eq(self.padding_idx)).to(torch.long)
+    emb = self.embeddings(input_ids=tgt,attention_mask=attn_mask)
+    # (B, T, 1024), 已经有位置信息
+    emb = emb.last_hidden_state
+    emb = self.act(self.linear_layer(emb))
+    output = emb
 
-    # tgt_emb: (batch_size, seq_len, dim)
-    output = emb.transpose(0, 1).contiguous()
-    # encoder_output: (batch_size, seq_len, dim)
-    src_memory_bank = memory_bank.transpose(0, 1).contiguous()
-
-    pad_idx = self.embeddings.word_padding_idx
-    src_pad_mask = src_words.data.eq(pad_idx).unsqueeze(1)  # [B, 1, T_src]
+    src_pad_mask = src.data.eq(self.padding_idx).unsqueeze(1)  # [B, 1, T_src]
     # inference: 如果当前单词是padding, 被mask
-    tgt_pad_mask = tgt_words.data.eq(pad_idx).unsqueeze(1)  # [B, 1, T_tgt]
+    tgt_pad_mask = tgt.data.eq(self.padding_idx).unsqueeze(1)  # [B, 1, T_tgt]
 
     for i in range(self.num_layers):
       output, attn = self.transformer_layers[i](
@@ -201,13 +198,13 @@ class TransformerDecoder(nn.Module):
     output = self.layer_norm(output)
 
     # Process the result and update the attentions.
-    dec_outs = output.transpose(0, 1).contiguous()
-    attn = attn.transpose(0, 1).contiguous()
+    # dec_outs = output.transpose(0, 1).contiguous()
+    # attn = attn.transpose(0, 1).contiguous()
 
     attns["std"] = attn
 
     # TODO change the way attns is returned dict => list or tuple (onnx)
-    return dec_outs, attns
+    return output, attns
 
   def _init_cache(self, num_layers):
     self.state["cache"] = {}

@@ -16,9 +16,9 @@ class PfamDataset(object):
             os.makedirs(self.output_dir)
         self.sa_num = sa_num
         output_file_template = os.path.join(self.output_dir, "##_%d.txt")
-        self.fs_train = [open(output_file_template.replace("##", "train") % i, "a") for i in range(sa_num)]
-        self.fs_valid = [open(output_file_template.replace("##", "valid") % i, "a") for i in range(sa_num)]
-        self.fs_test = [open(output_file_template.replace("##", "test") % i, "a") for i in range(sa_num)]
+        self.fs_train = [open(output_file_template.replace("##", "train") % i, "w") for i in range(sa_num)]
+        self.fs_valid = [open(output_file_template.replace("##", "valid") % i, "w") for i in range(sa_num)]
+        self.fs_test = [open(output_file_template.replace("##", "test") % i, "w") for i in range(sa_num)]
 
     def get_instances(self):
         if len(self.instances) != 0:
@@ -52,6 +52,7 @@ class PfamDataset(object):
             else:
                 seq_label.append(num)
                 num = 0
+        seq_label.append(num) # use </s> as virtual token.
         label_str = ','.join(map(str, seq_label))
         label_num = len(seq_label)
         return label_str, label_num
@@ -68,7 +69,7 @@ class PfamDataset(object):
                     id = alignment[alignment_index].id.replace(" ", "")
                     seq = self._get_seq(alignment[alignment_index].seq)
                     label, label_num = self._get_label(alignment[alignment_index].seq)
-                    assert len(seq) == label_num
+                    assert len(seq) == label_num-1
                     caches[cache_index].append("%s\t%s\t%s\n" % (id, seq, label))
                 if len(caches[0]) == ds_size:
                     break
