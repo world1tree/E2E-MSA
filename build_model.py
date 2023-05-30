@@ -96,10 +96,10 @@ def build_base_model(model_opt, checkpoint=None):
     model = NMTModel(encoder, decoder)
 
     # Build Generator.
-    gen_func = nn.LogSoftmax(dim=-1)
+    # gen_func = nn.LogSoftmax(dim=-1)
     generator = nn.Sequential(
-        nn.Linear(model_opt.dec_rnn_size, 15, bias=False), # 15-25分类已经足够
-        gen_func
+        nn.Linear(model_opt.dec_rnn_size, 1), # 修改为回归模型
+        # gen_func
     )
     # Load the model states from checkpoint or initialize them.
     if checkpoint is not None:

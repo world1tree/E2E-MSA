@@ -106,7 +106,9 @@ def train(model, train_dataloader, val_dataloader, learning_rate, epochs):
     for epoch_num in range(epochs):
         # 定义两个变量，用于存储训练集的准确率和损失
         total_acc1_train = 0
+        total_train1 = 0
         total_acc2_train = 0
+        total_train2 = 0
         total_loss_train = 0
         # 进度条函数tqdm
         for train_data in train_dataloader:
@@ -118,22 +120,26 @@ def train(model, train_dataloader, val_dataloader, learning_rate, epochs):
             label2 = train_data["label2"]
             # 通过模型得到输出
             output1 = model(seq1, seq2, length1)[0]
-            label2_logits = model.generator(output1)
-            label2_pred = torch.argmax(label2_logits, dim=-1)
+            label2_pred = model.generator(output1).unsqueeze(-1)
+            # label2_pred = torch.argmax(label2_logits, dim=-1)
             seq2_mask = (~(seq2.eq(padding_idx))).to(torch.float)
             label2_pred = label2_pred * seq2_mask
             loss2 = criterion(label2, label2_pred)
             acc2 = torch.sum((label2==label2_pred)*seq2_mask, dtype=torch.long).item()
-            total2 = torch.sum((label2!=label2_pred)*seq2_mask, dtype=torch.long).item()
+            # total2 = torch.sum((label2!=label2_pred)*seq2_mask, dtype=torch.long).item()
+            total2 = torch.sum(seq2_mask, dtype=torch.long).item()
+            total_train2 += total2
 
             output2 = model(seq2, seq1, length2)[0]
-            label1_logits = model.generator(output2)
-            label1_pred = torch.argmax(label1_logits, dim=-1)
+            label1_pred = model.generator(output2).unsqueeze(-1)
+            # label1_pred = torch.argmax(label1_logits, dim=-1)
             seq1_mask = (~(seq1.eq(padding_idx))).to(torch.float)
             label1_pred = label1_pred * seq1_mask
             loss1 = criterion(label1, label1_pred)
             acc1 = torch.sum((label1==label1_pred)*seq1_mask, dtype=torch.long).item()
-            total1 = torch.sum((label1!=label1_pred)*seq1_mask, dtype=torch.long).item()
+            # total1 = torch.sum((label1!=label1_pred)*seq1_mask, dtype=torch.long).item()
+            total1 = torch.sum(seq1_mask, dtype=torch.long).item()
+            total_train1 += total1
 
             batch_loss = loss1 + loss2
             # 计算损失
@@ -170,8 +176,8 @@ def train(model, train_dataloader, val_dataloader, learning_rate, epochs):
         print(
             f'''Epochs: {epoch_num + 1} 
               | Train Loss: {total_loss_train / len(train_data): .3f} 
-              | Train Accuracy1: {total_acc2_train / len(train_data): .3f} 
-              | Train Accuracy2: {total_acc1_train / len(train_data): .3f}''')
+              | Train Accuracy1: {total_acc2_train / total_train2: .3f} 
+              | Train Accuracy2: {total_acc1_train / total_train1: .3f}''')
               # | Val Loss: {total_loss_val / len(val_data): .3f}
               # | Val Accuracy: {total_acc_val / len(val_data): .3f}''')
 
