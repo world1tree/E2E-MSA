@@ -83,13 +83,13 @@ class MSADataset(torch.utils.data.Dataset):
         }
         return out
 
-def build_data_iter(msa_file_list, data_type="train"):
+def build_data_iter(msa_file_list, data_type="train", batch_size=32):
     tokenizer = T5Tokenizer.from_pretrained('Rostlab/prot_t5_xl_half_uniref50-enc', do_lower_case=False)
     dataset = MSADataset(msa_file_list, tokenizer, data_type=data_type)
     dataloader = torch.utils.data.DataLoader(
         dataset,
         collate_fn=dataset.collater,
-        batch_size=2,
+        batch_size=batch_size,
         shuffle=True
     )
     return dataloader

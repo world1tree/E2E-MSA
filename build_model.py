@@ -82,6 +82,9 @@ def build_base_model(model_opt, checkpoint=None):
 
     # Build encoder.
     src_embeddings = build_embeddings()
+    # 冻住预训练embedding
+    for name, parameter in src_embeddings.named_parameters():
+        parameter.requires_grad = False
     encoder = build_encoder(model_opt, src_embeddings)
 
     # Build decoder.

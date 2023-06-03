@@ -4,6 +4,10 @@ from build_dataset import build_data_iter
 from build_model import build_model
 from dataclasses import dataclass, field
 
+def _tally_parameters(model):
+    n_params = sum([p.nelement() for p in model.parameters() if p.requires_grad])
+    return n_params
+
 @dataclass
 class ModelConfig(object):
     src_word_vec_size:int=field(
@@ -34,13 +38,13 @@ class ModelConfig(object):
         }
     )
     enc_layers:int=field(
-        default=1,
+        default=6,
         metadata={
             "help": "Number of layers in the encoder"
         }
     )
     dec_layers:int=field(
-        default=1,
+        default=6,
         metadata={
             "help": "Number of layers in the decoder"
         }
@@ -90,67 +94,107 @@ class ModelConfig(object):
         }
     )
 
-def train(model, train_dataloader, val_dataloader, learning_rate, epochs):
+def model_forward(model, criterion, seq1, seq2, seq1_length, label, padding_idx):
+    # seq1经过encoder0, seq2经过encoder1, 预测seq2的结果
+    output1 = model(seq1, seq2, seq1_length)[0]
+    pred = model.generator(output1).squeeze(-1)
+    # 非padding为1, padding为0
+    pred_mask = (~(seq2.eq(padding_idx))).to(torch.long)
+    # 排除掉padding的预测结果
+    pred = pred * pred_mask
+    ntokens = torch.sum(pred_mask).item()
+    # 计算平均loss
+    loss = criterion(label, pred) / ntokens
+
+    # 计算预测准确率
+    pred_round = torch.round(pred)
+    correct_ntokens = torch.sum((label == pred_round) * pred_mask, dtype=torch.long).item()
+
+    return loss, correct_ntokens, ntokens
+
+
+def train(model, train_dataloader, val_dataloader, learning_rate, epochs, log_steps):
     padding_idx = model.encoder.padding_idx
     # 通过Dataset类获取训练和验证集
     # 判断是否使用GPU
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
     # 定义损失函数和优化器
-    criterion = torch.nn.MSELoss()
-    optimizer = Adam(model.parameters(), lr=learning_rate)
+    criterion = torch.nn.MSELoss(reduction="sum")
+    optimizer = Adam(model.parameters(), lr=learning_rate, betas=(0.9, 0.998))
     if use_cuda:
         model = model.cuda()
         criterion = criterion.cuda()
+    # 日志输出
+    train_epoch_loss = 0.
+    total_correct1 = 0
+    total_correct2 = 0
+    total_ntokens1 = 0
+    total_ntokens2 = 0
+    train_step_loss = 0.
+    step_correct1 = 0
+    step_correct2 = 0
+    step_ntokens1 = 0
+    step_ntokens2 = 0
     # 开始进入训练循环
     for epoch_num in range(epochs):
-        # 定义两个变量，用于存储训练集的准确率和损失
-        total_acc1_train = 0
-        total_train1 = 0
-        total_acc2_train = 0
-        total_train2 = 0
-        total_loss_train = 0
         # 进度条函数tqdm
-        for train_data in train_dataloader:
-            seq1 = train_data["seq1"]
-            seq2 = train_data["seq2"]
-            length1 = train_data["length1"]
-            length2 = train_data["length2"]
-            label1 = train_data["label1"]
-            label2 = train_data["label2"]
-            # 通过模型得到输出
-            output1 = model(seq1, seq2, length1)[0]
-            label2_pred = model.generator(output1).unsqueeze(-1)
-            # label2_pred = torch.argmax(label2_logits, dim=-1)
-            seq2_mask = (~(seq2.eq(padding_idx))).to(torch.float)
-            label2_pred = label2_pred * seq2_mask
-            loss2 = criterion(label2, label2_pred)
-            acc2 = torch.sum((label2==label2_pred)*seq2_mask, dtype=torch.long).item()
-            # total2 = torch.sum((label2!=label2_pred)*seq2_mask, dtype=torch.long).item()
-            total2 = torch.sum(seq2_mask, dtype=torch.long).item()
-            total_train2 += total2
+        for step, train_data in enumerate(train_dataloader, start=1):
+            seq1 = train_data["seq1"].to(device)
+            seq2 = train_data["seq2"].to(device)
+            length1 = train_data["length1"].to(device)
+            length2 = train_data["length2"].to(device)
+            label1 = train_data["label1"].to(device)
+            label2 = train_data["label2"].to(device)
 
-            output2 = model(seq2, seq1, length2)[0]
-            label1_pred = model.generator(output2).unsqueeze(-1)
-            # label1_pred = torch.argmax(label1_logits, dim=-1)
-            seq1_mask = (~(seq1.eq(padding_idx))).to(torch.float)
-            label1_pred = label1_pred * seq1_mask
-            loss1 = criterion(label1, label1_pred)
-            acc1 = torch.sum((label1==label1_pred)*seq1_mask, dtype=torch.long).item()
-            # total1 = torch.sum((label1!=label1_pred)*seq1_mask, dtype=torch.long).item()
-            total1 = torch.sum(seq1_mask, dtype=torch.long).item()
-            total_train1 += total1
+            # 预测seq2对应的label
+            avg_loss1, correct1, ntokens1 = model_forward(model, criterion, seq1, seq2, length1, label2, padding_idx)
+            # 预测seq1对应的label
+            avg_loss2, correct2, ntokens2 = model_forward(model, criterion, seq2, seq1, length2, label1, padding_idx)
+            # 记录用于日志输出
+            total_correct1 += correct1
+            total_correct2 += correct2
+            total_ntokens1 += ntokens1
+            total_ntokens2 += ntokens2
+            step_correct1 += correct1
+            step_correct2 += correct2
+            step_ntokens1 += ntokens1
+            step_ntokens2 += ntokens2
 
-            batch_loss = loss1 + loss2
+            batch_loss = avg_loss1 + avg_loss2
             # 计算损失
-            total_loss_train += batch_loss.item()
+            train_epoch_loss += batch_loss.item()
+            train_step_loss += batch_loss.item()
             # 计算精度
-            total_acc2_train += acc2
-            total_acc1_train += acc1
             # 模型更新
             model.zero_grad()
             batch_loss.backward()
             optimizer.step()
+
+            # 输出训练信息
+            if step % log_steps == 0:
+                print(
+                    f'''Epochs: {epoch_num + 1} 
+                      | Step: {step}
+                      | Train Loss: {train_step_loss / log_steps: .3f} 
+                      | Train Accuracy1: {1.0 * step_correct1 / step_ntokens1: .3f} 
+                      | Train Accuracy2: {1.0 * step_correct2 / step_ntokens2: .3f}''')
+                train_step_loss = 0.
+                step_correct1 = 0
+                step_correct2 = 0
+                step_ntokens1 = 0
+                step_ntokens2 = 0
+        print(
+            f'''Epochs: {epoch_num + 1} 
+              | Step: {step}
+              | Train Loss: {train_epoch_loss / len(train_dataloader): .3f} 
+              | Train Accuracy1: {1.0 * total_correct1 / total_ntokens1: .3f} 
+              | Train Accuracy2: {1.0 * total_correct2 / total_ntokens2: .3f}''')
+        train_epoch_loss = 0.
+        total_correct1 = 0
+        total_correct2 = 0
+        total_ntokens1 = 0
+        total_ntokens2 = 0
 
         # # ------ 验证模型 -----------
         # # 定义两个变量，用于存储验证集的准确率和损失
@@ -173,17 +217,12 @@ def train(model, train_dataloader, val_dataloader, learning_rate, epochs):
         #         acc = (output.argmax(dim=1) == val_label).sum().item()
         #         total_acc_val += acc
 
-        print(
-            f'''Epochs: {epoch_num + 1} 
-              | Train Loss: {total_loss_train / len(train_data): .3f} 
-              | Train Accuracy1: {total_acc2_train / total_train2: .3f} 
-              | Train Accuracy2: {total_acc1_train / total_train1: .3f}''')
-              # | Val Loss: {total_loss_val / len(val_data): .3f}
-              # | Val Accuracy: {total_acc_val / len(val_data): .3f}''')
-
 EPOCHS = 5
+LOG_STEPS = 5
 model = build_model(ModelConfig())
-LR = 1e-6
-train_dataloader = build_data_iter(["data/train_0.txt", "data/train_1.txt"], data_type="train")
-valid_dataloader = build_data_iter(["data/valid_0.txt", "data/valid_1.txt"], data_type="valid")
-train(model, train_dataloader, valid_dataloader, LR, EPOCHS)
+nparams = _tally_parameters(model)
+print("number of parameters: %d" % nparams)
+LR = 1e-4
+train_dataloader = build_data_iter(["data/train_0.txt", "data/train_1.txt"], data_type="train", batch_size=32)
+valid_dataloader = build_data_iter(["data/valid_0.txt", "data/valid_1.txt"], data_type="valid", batch_size=32)
+train(model, train_dataloader, valid_dataloader, LR, EPOCHS, LOG_STEPS)
