@@ -201,7 +201,7 @@ class MultiHeadedAttention(nn.Module):
     if mask is not None:
         mask = mask.unsqueeze(1)  # [B, 1, 1, T_values] (T_values会重复seq_len次)
         # mask=True的位置的值被填充-1e18, 也就是说padding必须为1
-        scores = scores.masked_fill(mask, -1e18)
+        scores = scores.masked_fill(mask, float("-inf"))
 
     # 3) Apply attention dropout and compute context vectors.
     # (batch_size, head_count, seq_len, seq_len)

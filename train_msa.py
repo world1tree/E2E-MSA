@@ -112,7 +112,7 @@ def model_forward(model, criterion, seq1, seq2, seq1_length, label, padding_idx)
     pred_round = torch.round(pred)
     correct_ntokens = torch.sum((label_round == pred_round) * pred_mask, dtype=torch.long).item()
 
-    return loss, correct_ntokens, ntokens
+    return loss, correct_ntokens, ntokens, pred_round, pred_mask
 
 def do_valid(model, criterion, val_dataloader, device, padding_idx):
     logger.info("Epoch End. Running valid.")
@@ -131,9 +131,9 @@ def do_valid(model, criterion, val_dataloader, device, padding_idx):
             label1 = val_data["label1"].to(device)
             label2 = val_data["label2"].to(device)
             # 预测seq2对应的label
-            avg_loss1, correct1, ntokens1 = model_forward(model, criterion, seq1, seq2, length1, label2, padding_idx)
+            avg_loss1, correct1, ntokens1, _, _ = model_forward(model, criterion, seq1, seq2, length1, label2, padding_idx)
             # 预测seq1对应的label
-            avg_loss2, correct2, ntokens2 = model_forward(model, criterion, seq2, seq1, length2, label1, padding_idx)
+            avg_loss2, correct2, ntokens2, _, _ = model_forward(model, criterion, seq2, seq1, length2, label1, padding_idx)
             dev_loss = avg_loss1 + avg_loss2
             total_dev_loss += dev_loss.item()
             total_correct1 += correct1
@@ -143,13 +143,34 @@ def do_valid(model, criterion, val_dataloader, device, padding_idx):
         logger.info(f'''Dev Loss: {total_dev_loss / len(val_dataloader): .3f} Dev Acc1: {1.0 * total_correct1 / total_ntokens1: .3f} Dev Acc2: {1.0 * total_correct2 / total_ntokens2: .3f}''')
     model.train()
 
-def do_test(model, criterion, test_dataloader, device, padding_idx):
+def do_test(model, criterion, test_dataloader, device, padding_idx, result_file="align.txt"):
+
+    def _get_alignments(seq, length, pred):
+        seq = seq.cpu()
+        length = length.cpu()
+        pred = pred.cpu()
+        align_list = list()
+        for i, pred_single in enumerate(pred):
+            align_str = ""
+            p = pred_single[length[i]]
+            seq_ids_without_padding = seq[i][length[i]-1]
+            tokens = model.tokenizer.convert_ids_to_tokens(seq_ids_without_padding)
+            for j, token in enumerate(tokens):
+                freq = p[j].item()
+                align_str = align_str + "-" * freq + token
+            freq = p[-1].item() # last
+            align_str += "-" * freq
+            align_list.append(align_str)
+        return align_list
+
     logger.info("Train End. Running test.")
     model.eval()
     total_correct1 = 0
     total_correct2 = 0
     total_ntokens1 = 0
     total_ntokens2 = 0
+    align_list1 = list()
+    align_list2 = list()
     with torch.no_grad():
         for test_data in test_dataloader:
             seq1 = test_data["seq1"].to(device)
@@ -159,13 +180,37 @@ def do_test(model, criterion, test_dataloader, device, padding_idx):
             label1 = test_data["label1"].to(device)
             label2 = test_data["label2"].to(device)
             # 预测seq2对应的label
-            _, correct1, ntokens1 = model_forward(model, criterion, seq1, seq2, length1, label2, padding_idx)
+            _, correct1, ntokens1, pred1, pred_mask1 = model_forward(model, criterion, seq1, seq2, length1, label2, padding_idx)
             # 预测seq1对应的label
-            _, correct2, ntokens2 = model_forward(model, criterion, seq2, seq1, length2, label1, padding_idx)
+            _, correct2, ntokens2, pred2, pred_mask2 = model_forward(model, criterion, seq2, seq1, length2, label1, padding_idx)
             total_correct1 += correct1
             total_correct2 += correct2
             total_ntokens1 += ntokens1
             total_ntokens2 += ntokens2
+
+            _align_list1 = _get_alignments(seq1, length1, pred1)
+            _align_list2 = _get_alignments(seq2, length2, pred2)
+            align_list1.extend(_align_list1)
+            align_list2.extend(_align_list2)
+        f = open(result_file, "a")
+        for s1, s2 in zip(align_list1, align_list2):
+            s1 = s1.lstrip("-")
+            s2 = s2.lstrip("-")
+            max_len = max(len(s1), len(s2))
+            if len(s1) < max_len:
+                s1 = s1 + "-" * (max_len-len(s1))
+            if len(s2) < max_len:
+                s2 = s2 + "-" * (max_len-len(s2))
+            result_s1 = ""
+            result_s2 = ""
+            for a, b in zip(s1, s2):
+                if a == "-" and b == "-":
+                    continue
+                result_s1 += a
+                result_s2 += b
+            f.write(result_s1 + "\t" + result_s2 + "\n")
+        f.close()
+
         logger.info(f'''Test Acc1: {1.0 * total_correct1 / total_ntokens1: .3f} Test Acc2: {1.0 * total_correct2 / total_ntokens2: .3f}''')
     model.train()
 
@@ -209,9 +254,9 @@ def train(model, train_dataloader, val_dataloader, test_dataloader, learning_rat
 
             with autocast():
                 # 预测seq2对应的label
-                avg_loss1, correct1, ntokens1 = model_forward(model, criterion, seq1, seq2, length1, label2, padding_idx)
+                avg_loss1, correct1, ntokens1, _, _ = model_forward(model, criterion, seq1, seq2, length1, label2, padding_idx)
                 # 预测seq1对应的label
-                avg_loss2, correct2, ntokens2 = model_forward(model, criterion, seq2, seq1, length2, label1, padding_idx)
+                avg_loss2, correct2, ntokens2, _, _ = model_forward(model, criterion, seq2, seq1, length2, label1, padding_idx)
             # 记录用于日志输出
             total_correct1 += correct1
             total_correct2 += correct2
@@ -231,6 +276,7 @@ def train(model, train_dataloader, val_dataloader, test_dataloader, learning_rat
             model.zero_grad()
             scaler.scale(batch_loss).backward()
             scaler.step(optimizer)
+            scaler.update()
             # batch_loss.backward()
             # optimizer.step()
 
@@ -242,9 +288,6 @@ def train(model, train_dataloader, val_dataloader, test_dataloader, learning_rat
                 step_correct2 = 0
                 step_ntokens1 = 0
                 step_ntokens2 = 0
-                # # ------ 验证模型 -----------
-                do_valid(model, criterion, val_dataloader, device, padding_idx)
-                do_test(model, criterion, test_dataloader, device, padding_idx)
         logger.info(f'''Epochs: {epoch_num + 1} Step: {step} Train Loss: {train_epoch_loss / len(train_dataloader): .3f} Train Acc1: {1.0 * total_correct1 / total_ntokens1: .3f} Train Acc2: {1.0 * total_correct2 / total_ntokens2: .3f}''')
         train_epoch_loss = 0.
         total_correct1 = 0
