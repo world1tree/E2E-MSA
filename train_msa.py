@@ -1,4 +1,5 @@
 import torch
+from utils.logging import init_logger, logger
 from torch.optim import Adam
 from build_dataset import build_data_iter
 from build_model import build_model
@@ -113,8 +114,66 @@ def model_forward(model, criterion, seq1, seq2, seq1_length, label, padding_idx)
 
     return loss, correct_ntokens, ntokens
 
+def do_valid(model, criterion, val_dataloader, device, padding_idx):
+    logger.info("Epoch End. Running valid.")
+    model.eval()
+    total_dev_loss = 0.
+    total_correct1 = 0
+    total_correct2 = 0
+    total_ntokens1 = 0
+    total_ntokens2 = 0
+    with torch.no_grad():
+        for val_data in val_dataloader:
+            seq1 = val_data["seq1"].to(device)
+            seq2 = val_data["seq2"].to(device)
+            length1 = val_data["length1"].to(device)
+            length2 = val_data["length2"].to(device)
+            label1 = val_data["label1"].to(device)
+            label2 = val_data["label2"].to(device)
+            # 预测seq2对应的label
+            avg_loss1, correct1, ntokens1 = model_forward(model, criterion, seq1, seq2, length1, label2, padding_idx)
+            # 预测seq1对应的label
+            avg_loss2, correct2, ntokens2 = model_forward(model, criterion, seq2, seq1, length2, label1, padding_idx)
+            dev_loss = avg_loss1 + avg_loss2
+            total_dev_loss += dev_loss.item()
+            total_correct1 += correct1
+            total_correct2 += correct2
+            total_ntokens1 += ntokens1
+            total_ntokens2 += ntokens2
+        logger.info(f'''Dev Loss: {total_dev_loss / len(val_dataloader): .3f} Dev Acc1: {1.0 * total_correct1 / total_ntokens1: .3f} Dev Acc2: {1.0 * total_correct2 / total_ntokens2: .3f}''')
+    model.train()
 
-def train(model, train_dataloader, val_dataloader, learning_rate, epochs, log_steps):
+def do_test(model, criterion, test_dataloader, device, padding_idx):
+    logger.info("Train End. Running test.")
+    model.eval()
+    total_correct1 = 0
+    total_correct2 = 0
+    total_ntokens1 = 0
+    total_ntokens2 = 0
+    with torch.no_grad():
+        for test_data in test_dataloader:
+            seq1 = test_data["seq1"].to(device)
+            seq2 = test_data["seq2"].to(device)
+            length1 = test_data["length1"].to(device)
+            length2 = test_data["length2"].to(device)
+            label1 = test_data["label1"].to(device)
+            label2 = test_data["label2"].to(device)
+            # 预测seq2对应的label
+            _, correct1, ntokens1 = model_forward(model, criterion, seq1, seq2, length1, label2, padding_idx)
+            # 预测seq1对应的label
+            _, correct2, ntokens2 = model_forward(model, criterion, seq2, seq1, length2, label1, padding_idx)
+            total_correct1 += correct1
+            total_correct2 += correct2
+            total_ntokens1 += ntokens1
+            total_ntokens2 += ntokens2
+        logger.info(f'''Test Acc1: {1.0 * total_correct1 / total_ntokens1: .3f} Test Acc2: {1.0 * total_correct2 / total_ntokens2: .3f}''')
+    model.train()
+
+def train(model, train_dataloader, val_dataloader, test_dataloader, learning_rate, epochs, log_steps):
+    # 混合精度设置
+    scaler = torch.cuda.amp.GradScaler()
+    autocast = torch.cuda.amp.autocast
+
     padding_idx = model.encoder.padding_idx
     # 通过Dataset类获取训练和验证集
     # 判断是否使用GPU
@@ -148,10 +207,11 @@ def train(model, train_dataloader, val_dataloader, learning_rate, epochs, log_st
             label1 = train_data["label1"].to(device)
             label2 = train_data["label2"].to(device)
 
-            # 预测seq2对应的label
-            avg_loss1, correct1, ntokens1 = model_forward(model, criterion, seq1, seq2, length1, label2, padding_idx)
-            # 预测seq1对应的label
-            avg_loss2, correct2, ntokens2 = model_forward(model, criterion, seq2, seq1, length2, label1, padding_idx)
+            with autocast():
+                # 预测seq2对应的label
+                avg_loss1, correct1, ntokens1 = model_forward(model, criterion, seq1, seq2, length1, label2, padding_idx)
+                # 预测seq1对应的label
+                avg_loss2, correct2, ntokens2 = model_forward(model, criterion, seq2, seq1, length2, label1, padding_idx)
             # 记录用于日志输出
             total_correct1 += correct1
             total_correct2 += correct2
@@ -169,28 +229,23 @@ def train(model, train_dataloader, val_dataloader, learning_rate, epochs, log_st
             # 计算精度
             # 模型更新
             model.zero_grad()
-            batch_loss.backward()
-            optimizer.step()
+            scaler.scale(batch_loss).backward()
+            scaler.step(optimizer)
+            # batch_loss.backward()
+            # optimizer.step()
 
             # 输出训练信息
             if step % log_steps == 0:
-                print(
-                    f'''Epochs: {epoch_num + 1} 
-                      | Step: {step}
-                      | Train Loss: {train_step_loss / log_steps: .3f} 
-                      | Train Accuracy1: {1.0 * step_correct1 / step_ntokens1: .3f} 
-                      | Train Accuracy2: {1.0 * step_correct2 / step_ntokens2: .3f}''')
+                logger.info(f'''Epochs: {epoch_num + 1} Step: {step} Train Loss: {train_step_loss / log_steps: .3f} Train Acc1: {1.0 * step_correct1 / step_ntokens1: .3f} Train Acc2: {1.0 * step_correct2 / step_ntokens2: .3f}''')
                 train_step_loss = 0.
                 step_correct1 = 0
                 step_correct2 = 0
                 step_ntokens1 = 0
                 step_ntokens2 = 0
-        print(
-            f'''Epochs: {epoch_num + 1} 
-              | Step: {step}
-              | Train Loss: {train_epoch_loss / len(train_dataloader): .3f} 
-              | Train Accuracy1: {1.0 * total_correct1 / total_ntokens1: .3f} 
-              | Train Accuracy2: {1.0 * total_correct2 / total_ntokens2: .3f}''')
+                # # ------ 验证模型 -----------
+                do_valid(model, criterion, val_dataloader, device, padding_idx)
+                do_test(model, criterion, test_dataloader, device, padding_idx)
+        logger.info(f'''Epochs: {epoch_num + 1} Step: {step} Train Loss: {train_epoch_loss / len(train_dataloader): .3f} Train Acc1: {1.0 * total_correct1 / total_ntokens1: .3f} Train Acc2: {1.0 * total_correct2 / total_ntokens2: .3f}''')
         train_epoch_loss = 0.
         total_correct1 = 0
         total_correct2 = 0
@@ -198,32 +253,19 @@ def train(model, train_dataloader, val_dataloader, learning_rate, epochs, log_st
         total_ntokens2 = 0
 
         # # ------ 验证模型 -----------
-        # # 定义两个变量，用于存储验证集的准确率和损失
-        # total_acc_val = 0
-        # total_loss_val = 0
-        # # 不需要计算梯度
-        # with torch.no_grad():
-        #     # 循环获取数据集，并用训练好的模型进行验证
-        #     for val_input, val_label in val_dataloader:
-        #         # 如果有GPU，则使用GPU，接下来的操作同训练
-        #         val_label = val_label.to(device)
-        #         mask = val_input['attention_mask'].to(device)
-        #         input_id = val_input['input_ids'].squeeze(1).to(device)
-        #
-        #         output = model(input_id, mask)
-        #
-        #         batch_loss = criterion(output, val_label)
-        #         total_loss_val += batch_loss.item()
-        #
-        #         acc = (output.argmax(dim=1) == val_label).sum().item()
-        #         total_acc_val += acc
+        do_valid(model, criterion, val_dataloader, device, padding_idx)
+    do_test(model, criterion, test_dataloader, device, padding_idx)
 
-EPOCHS = 5
-LOG_STEPS = 5
-model = build_model(ModelConfig())
-nparams = _tally_parameters(model)
-print("number of parameters: %d" % nparams)
-LR = 1e-4
-train_dataloader = build_data_iter(["data/train_0.txt", "data/train_1.txt"], data_type="train", batch_size=16)
-valid_dataloader = build_data_iter(["data/valid_0.txt", "data/valid_1.txt"], data_type="valid", batch_size=16)
-train(model, train_dataloader, valid_dataloader, LR, EPOCHS, LOG_STEPS)
+if __name__ == '__main__':
+    EPOCHS = 5
+    LOG_STEPS = 5
+    model = build_model(ModelConfig())
+    nparams = _tally_parameters(model)
+    print("number of parameters: %d" % nparams)
+    LR = 1e-4
+    train_dataloader = build_data_iter(["data/train_0.txt", "data/train_1.txt"], data_type="train", batch_size=16)
+    valid_dataloader = build_data_iter(["data/valid_0.txt", "data/valid_1.txt"], data_type="valid", batch_size=16)
+    test_dataloader = build_data_iter(["data/test_0.txt", "data/test_1.txt"], data_type="test", batch_size=16)
+    # 初始化logger
+    init_logger()
+    train(model, train_dataloader, valid_dataloader, test_dataloader, LR, EPOCHS, LOG_STEPS)
