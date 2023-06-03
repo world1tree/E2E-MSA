@@ -40,7 +40,7 @@ class MSADataset(torch.utils.data.Dataset):
     def do_tokenize(self, seq, label):
         seq = " ".join(list(re.sub(r"[UZOB]", "X", seq)))
         seq = self.tokenizer(seq, return_tensors="pt")["input_ids"][0]
-        label = torch.tensor(list(map(int, label.split(","))), dtype=torch.long)
+        label = torch.tensor(list(map(int, label.split(","))), dtype=torch.float)
         assert seq.shape[0] == label.shape[0] # 追加了</s>, tokens数量应当是相同的
         return seq, label
 

@@ -99,7 +99,7 @@ def model_forward(model, criterion, seq1, seq2, seq1_length, label, padding_idx)
     output1 = model(seq1, seq2, seq1_length)[0]
     pred = model.generator(output1).squeeze(-1)
     # 非padding为1, padding为0
-    pred_mask = (~(seq2.eq(padding_idx))).to(torch.long)
+    pred_mask = (~(seq2.eq(padding_idx))).to(torch.float)
     # 排除掉padding的预测结果
     pred = pred * pred_mask
     ntokens = torch.sum(pred_mask).item()
@@ -107,8 +107,9 @@ def model_forward(model, criterion, seq1, seq2, seq1_length, label, padding_idx)
     loss = criterion(label, pred) / ntokens
 
     # 计算预测准确率
+    label_round = torch.round(label)
     pred_round = torch.round(pred)
-    correct_ntokens = torch.sum((label == pred_round) * pred_mask, dtype=torch.long).item()
+    correct_ntokens = torch.sum((label_round == pred_round) * pred_mask, dtype=torch.long).item()
 
     return loss, correct_ntokens, ntokens
 
@@ -223,6 +224,6 @@ model = build_model(ModelConfig())
 nparams = _tally_parameters(model)
 print("number of parameters: %d" % nparams)
 LR = 1e-4
-train_dataloader = build_data_iter(["data/train_0.txt", "data/train_1.txt"], data_type="train", batch_size=32)
-valid_dataloader = build_data_iter(["data/valid_0.txt", "data/valid_1.txt"], data_type="valid", batch_size=32)
+train_dataloader = build_data_iter(["data/train_0.txt", "data/train_1.txt"], data_type="train", batch_size=16)
+valid_dataloader = build_data_iter(["data/valid_0.txt", "data/valid_1.txt"], data_type="valid", batch_size=16)
 train(model, train_dataloader, valid_dataloader, LR, EPOCHS, LOG_STEPS)
