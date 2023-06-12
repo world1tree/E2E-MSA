@@ -57,7 +57,7 @@ class PfamDataset(object):
         label_num = len(seq_label)
         return label_str, label_num
 
-    def create_dataset(self, train_num=1000, valid_num=100, test_num=100):
+    def create_dataset(self, train_num=30000, valid_num=3000, test_num=3000):
         ds_size = train_num + valid_num + test_num
         caches = [[] for _ in range(self.sa_num)]
         instances = self.get_instances()

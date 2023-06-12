@@ -95,24 +95,25 @@ class ModelConfig(object):
         }
     )
 
-def model_forward(model, criterion, seq1, seq2, seq1_length, label, padding_idx):
+def model_forward(model, criterion, seq1, seq2, seq1_length, label, g_label, padding_idx):
     # seq1经过encoder0, seq2经过encoder1, 预测seq2的结果
     output1 = model(seq1, seq2, seq1_length)[0]
-    pred = model.generator(output1).squeeze(-1)
+    pred = model.generator(output1)
     # 非padding为1, padding为0
     pred_mask = (~(seq2.eq(padding_idx))).to(torch.float)
     # 排除掉padding的预测结果
-    pred = pred * pred_mask
+    pred = pred * pred_mask.unsqueeze(-1)
     ntokens = torch.sum(pred_mask).item()
     # 计算平均loss
-    loss = criterion(label, pred) / ntokens
+    loss = criterion(label, pred[:,:,0]) / ntokens
+    g_loss = criterion(g_label, pred[:,:,1]) / ntokens
 
     # 计算预测准确率
     label_round = torch.round(label)
-    pred_round = torch.round(pred)
+    pred_round = torch.round(pred[:,:,0])
     correct_ntokens = torch.sum((label_round == pred_round) * pred_mask, dtype=torch.long).item()
 
-    return loss, correct_ntokens, ntokens, pred_round, pred_mask
+    return loss, g_loss, correct_ntokens, ntokens, pred_round, pred_mask
 
 def do_valid(model, criterion, val_dataloader, device, padding_idx):
     logger.info("Epoch End. Running valid.")
@@ -130,11 +131,13 @@ def do_valid(model, criterion, val_dataloader, device, padding_idx):
             length2 = val_data["length2"].to(device)
             label1 = val_data["label1"].to(device)
             label2 = val_data["label2"].to(device)
+            g_label1 = val_data["g_label1"].to(device)
+            g_label2 = val_data["g_label2"].to(device)
             # 预测seq2对应的label
-            avg_loss1, correct1, ntokens1, _, _ = model_forward(model, criterion, seq1, seq2, length1, label2, padding_idx)
+            avg_loss1, avg_g_loss1, correct1, ntokens1, _, _ = model_forward(model, criterion, seq1, seq2, length1, label2, g_label2, padding_idx)
             # 预测seq1对应的label
-            avg_loss2, correct2, ntokens2, _, _ = model_forward(model, criterion, seq2, seq1, length2, label1, padding_idx)
-            dev_loss = avg_loss1 + avg_loss2
+            avg_loss2, avg_g_loss2, correct2, ntokens2, _, _ = model_forward(model, criterion, seq2, seq1, length2, label1, g_label1, padding_idx)
+            dev_loss = avg_loss1 + avg_loss2 + avg_g_loss1 + avg_g_loss2
             total_dev_loss += dev_loss.item()
             total_correct1 += correct1
             total_correct2 += correct2
@@ -152,13 +155,14 @@ def do_test(model, criterion, test_dataloader, device, padding_idx, result_file=
         align_list = list()
         for i, pred_single in enumerate(pred):
             align_str = ""
-            p = pred_single[length[i]]
-            seq_ids_without_padding = seq[i][length[i]-1]
-            tokens = model.tokenizer.convert_ids_to_tokens(seq_ids_without_padding)
+            p = pred_single[:length[i]]
+            seq_ids_without_padding = seq[i][:length[i]-1].tolist()
+            tokens = model.encoder.embeddings.tokenizer.convert_ids_to_tokens(seq_ids_without_padding)
+            tokens = list(map(lambda ch: ch.lstrip('▁'), tokens))
             for j, token in enumerate(tokens):
-                freq = p[j].item()
+                freq = int(p[j].item())
                 align_str = align_str + "-" * freq + token
-            freq = p[-1].item() # last
+            freq = int(p[-1].item()) # last
             align_str += "-" * freq
             align_list.append(align_str)
         return align_list
@@ -179,17 +183,21 @@ def do_test(model, criterion, test_dataloader, device, padding_idx, result_file=
             length2 = test_data["length2"].to(device)
             label1 = test_data["label1"].to(device)
             label2 = test_data["label2"].to(device)
+            g_label1 = test_data["g_label1"].to(device)
+            g_label2 = test_data["g_label2"].to(device)
             # 预测seq2对应的label
-            _, correct1, ntokens1, pred1, pred_mask1 = model_forward(model, criterion, seq1, seq2, length1, label2, padding_idx)
+            _, _, correct1, ntokens1, pred1, pred_mask1 = model_forward(model, criterion, seq1, seq2, length1, label2, g_label2, padding_idx)
             # 预测seq1对应的label
-            _, correct2, ntokens2, pred2, pred_mask2 = model_forward(model, criterion, seq2, seq1, length2, label1, padding_idx)
+            _, _, correct2, ntokens2, pred2, pred_mask2 = model_forward(model, criterion, seq2, seq1, length2, label1, g_label1, padding_idx)
             total_correct1 += correct1
             total_correct2 += correct2
             total_ntokens1 += ntokens1
             total_ntokens2 += ntokens2
 
-            _align_list1 = _get_alignments(seq1, length1, pred1)
-            _align_list2 = _get_alignments(seq2, length2, pred2)
+            # 序列1的对齐信息
+            _align_list1 = _get_alignments(seq1, length1, pred2)
+            # 序列2的对齐信息
+            _align_list2 = _get_alignments(seq2, length2, pred1)
             align_list1.extend(_align_list1)
             align_list2.extend(_align_list2)
         f = open(result_file, "a")
@@ -251,12 +259,14 @@ def train(model, train_dataloader, val_dataloader, test_dataloader, learning_rat
             length2 = train_data["length2"].to(device)
             label1 = train_data["label1"].to(device)
             label2 = train_data["label2"].to(device)
+            g_label1 = train_data["g_label1"].to(device)
+            g_label2 = train_data["g_label2"].to(device)
 
             with autocast():
                 # 预测seq2对应的label
-                avg_loss1, correct1, ntokens1, _, _ = model_forward(model, criterion, seq1, seq2, length1, label2, padding_idx)
+                avg_loss1, avg_g_loss1, correct1, ntokens1, _, _ = model_forward(model, criterion, seq1, seq2, length1, label2, g_label2, padding_idx)
                 # 预测seq1对应的label
-                avg_loss2, correct2, ntokens2, _, _ = model_forward(model, criterion, seq2, seq1, length2, label1, padding_idx)
+                avg_loss2, avg_g_loss2, correct2, ntokens2, _, _ = model_forward(model, criterion, seq2, seq1, length2, label1, g_label1, padding_idx)
             # 记录用于日志输出
             total_correct1 += correct1
             total_correct2 += correct2
@@ -267,7 +277,7 @@ def train(model, train_dataloader, val_dataloader, test_dataloader, learning_rat
             step_ntokens1 += ntokens1
             step_ntokens2 += ntokens2
 
-            batch_loss = avg_loss1 + avg_loss2
+            batch_loss = avg_loss1 + avg_loss2 + avg_g_loss1 + avg_g_loss2
             # 计算损失
             train_epoch_loss += batch_loss.item()
             train_step_loss += batch_loss.item()
@@ -288,7 +298,7 @@ def train(model, train_dataloader, val_dataloader, test_dataloader, learning_rat
                 step_correct2 = 0
                 step_ntokens1 = 0
                 step_ntokens2 = 0
-        logger.info(f'''Epochs: {epoch_num + 1} Step: {step} Train Loss: {train_epoch_loss / len(train_dataloader): .3f} Train Acc1: {1.0 * total_correct1 / total_ntokens1: .3f} Train Acc2: {1.0 * total_correct2 / total_ntokens2: .3f}''')
+            # logger.info(f'''Epochs: {epoch_num + 1} Step: {step} Train Loss: {train_step_loss / log_steps: .3f} Train Acc1: {1.0 * step_correct1 / step_ntokens1: .3f} Train Acc2: {1.0 * step_correct2 / step_ntokens2: .3f}''')
         train_epoch_loss = 0.
         total_correct1 = 0
         total_correct2 = 0
@@ -302,13 +312,13 @@ def train(model, train_dataloader, val_dataloader, test_dataloader, learning_rat
 if __name__ == '__main__':
     EPOCHS = 5
     LOG_STEPS = 5
-    model = build_model(ModelConfig())
-    nparams = _tally_parameters(model)
-    print("number of parameters: %d" % nparams)
-    LR = 1e-4
-    train_dataloader = build_data_iter(["data/train_0.txt", "data/train_1.txt"], data_type="train", batch_size=16)
-    valid_dataloader = build_data_iter(["data/valid_0.txt", "data/valid_1.txt"], data_type="valid", batch_size=16)
-    test_dataloader = build_data_iter(["data/test_0.txt", "data/test_1.txt"], data_type="test", batch_size=16)
     # 初始化logger
     init_logger()
+    model = build_model(ModelConfig())
+    nparams = _tally_parameters(model)
+    logger.info("number of parameters: %d" % nparams)
+    LR = 1e-4
+    train_dataloader = build_data_iter(["data/train_0.txt", "data/train_1.txt"], data_type="train", batch_size=32)
+    valid_dataloader = build_data_iter(["data/valid_0.txt", "data/valid_1.txt"], data_type="valid", batch_size=32)
+    test_dataloader = build_data_iter(["data/test_0.txt", "data/test_1.txt"], data_type="test", batch_size=32, shuffle=False)
     train(model, train_dataloader, valid_dataloader, test_dataloader, LR, EPOCHS, LOG_STEPS)

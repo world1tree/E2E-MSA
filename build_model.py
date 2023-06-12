@@ -101,7 +101,7 @@ def build_base_model(model_opt, checkpoint=None):
     # Build Generator.
     # gen_func = nn.LogSoftmax(dim=-1)
     generator = nn.Sequential(
-        nn.Linear(model_opt.dec_rnn_size, 1), # 修改为回归模型
+        nn.Linear(model_opt.dec_rnn_size, 2), # 修改为回归模型
         # gen_func
     )
     # Load the model states from checkpoint or initialize them.
