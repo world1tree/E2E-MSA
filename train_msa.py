@@ -1,3 +1,4 @@
+import os
 import torch
 from utils.logging import init_logger, logger
 from torch.optim import Adam
@@ -94,6 +95,16 @@ class ModelConfig(object):
             "help": "Dropout probability; applied in LSTM stacks."
         }
     )
+
+def save_checkpoint(model, epoch, save_dir):
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    save_path = os.path.join(save_dir, "checkpoint%d.pt"%epoch)
+    state_dict = {
+        'model': model.state_dict()
+    }
+    logger.info("save checkpoint%d.pt"%epoch)
+    torch.save(state_dict, save_path)
 
 def model_forward(model, criterion, seq1, seq2, seq1_length, label, g_label, padding_idx):
     # seq1经过encoder0, seq2经过encoder1, 预测seq2的结果
@@ -238,6 +249,9 @@ def train(model, train_dataloader, val_dataloader, test_dataloader, learning_rat
     if use_cuda:
         model = model.cuda()
         criterion = criterion.cuda()
+    # state_dict = torch.load("checkpoints/checkpoint4.pt")
+    # model.load_state_dict(state_dict["model"])
+
     # 日志输出
     train_epoch_loss = 0.
     total_correct1 = 0
@@ -307,10 +321,11 @@ def train(model, train_dataloader, val_dataloader, test_dataloader, learning_rat
 
         # # ------ 验证模型 -----------
         do_valid(model, criterion, val_dataloader, device, padding_idx)
+        save_checkpoint(model, epoch_num, "checkpoints")
     do_test(model, criterion, test_dataloader, device, padding_idx)
 
 if __name__ == '__main__':
-    EPOCHS = 5
+    EPOCHS = 5 # need more epochs
     LOG_STEPS = 5
     # 初始化logger
     init_logger()
@@ -319,6 +334,6 @@ if __name__ == '__main__':
     logger.info("number of parameters: %d" % nparams)
     LR = 1e-4
     train_dataloader = build_data_iter(["data/train_0.txt", "data/train_1.txt"], data_type="train", batch_size=32)
-    valid_dataloader = build_data_iter(["data/valid_0.txt", "data/valid_1.txt"], data_type="valid", batch_size=32)
-    test_dataloader = build_data_iter(["data/test_0.txt", "data/test_1.txt"], data_type="test", batch_size=32, shuffle=False)
+    valid_dataloader = build_data_iter(["data/valid_0.txt", "data/valid_1.txt"], data_type="valid", batch_size=128)
+    test_dataloader = build_data_iter(["data/test_0.txt", "data/test_1.txt"], data_type="test", batch_size=128, shuffle=False)
     train(model, train_dataloader, valid_dataloader, test_dataloader, LR, EPOCHS, LOG_STEPS)

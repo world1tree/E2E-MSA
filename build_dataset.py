@@ -119,7 +119,7 @@ def build_data_iter(msa_file_list, data_type="train", batch_size=32, shuffle=Tru
 
 if __name__ == '__main__':
     init_logger()
-    msa_file_list = ["data/train_0.txt", "data/train_1.txt"]
+    msa_file_list = ["data/z0.txt", "data/z1.txt"]
     tokenizer = T5Tokenizer.from_pretrained('Rostlab/prot_t5_xl_half_uniref50-enc', do_lower_case=False)
     # ret = tokenizer.batch_encode_plus(["A A A A", "A A A A A A A A A A A"], add_special_tokens=True, padding="longest")
     # print(ret)
@@ -130,6 +130,9 @@ if __name__ == '__main__':
         batch_size=2,
         shuffle=True
     )
-    # for d in train_loader:
-    #     print(d)
-    #     exit(0)
+    for d in train_loader:
+        mask1 = d["seq1"].ne(0).int()
+        mask2 = d["seq2"].ne(0).int()
+        ret = torch.sum(d["g_label1"].int() * mask1 == d["g_label2"].int() * mask2)
+        print(ret)
+        exit(0)

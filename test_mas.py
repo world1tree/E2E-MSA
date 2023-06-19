@@ -1,0 +1,217 @@
+import os
+import math
+import torch
+from tqdm import tqdm
+from utils.logging import init_logger, logger
+from torch.optim import Adam
+from build_dataset import build_data_iter
+from build_model import build_model
+from dataclasses import dataclass, field
+
+@dataclass
+class ModelConfig(object):
+    src_word_vec_size:int=field(
+        default=512,
+        metadata={
+            "help": "Word embedding size for src."
+        }
+    )
+    tgt_word_vec_size:int=field(
+        default=512,
+        metadata={
+            "help": "Word embedding size for tgt."
+        }
+    )
+    share_embeddings:bool=field(
+        default=True,
+        metadata={
+            "help": "Share the word embeddings between encoder "
+                    "and decoder. Need to use shared dictionary for this "
+                    "option."
+        }
+    )
+    position_encoding:bool=field(
+        default=True,
+        metadata={
+            "help": "Use a sin to mark relative words positions."
+                    "Necessary for non-RNN style models."
+        }
+    )
+    enc_layers:int=field(
+        default=6,
+        metadata={
+            "help": "Number of layers in the encoder"
+        }
+    )
+    dec_layers:int=field(
+        default=6,
+        metadata={
+            "help": "Number of layers in the decoder"
+        }
+    )
+    enc_rnn_size:int=field(
+        default=512,
+        metadata={
+            "help": "Size of encoder rnn hidden states."
+                    "Must be equal to dec_rnn_size except for"
+                    "speech-to-text."
+        }
+    )
+    dec_rnn_size:int=field(
+        default=512,
+        metadata={
+            "help": "Size of decoder rnn hidden states."
+                    "Must be equal to dec_rnn_size except for"
+                    "speech-to-text."
+        }
+    )
+    self_attn_type:str=field(
+        default="scaled-dot",
+        metadata={
+            "help": "Self attention type in Transformer decoder"
+                    "layer -- currently 'scaled-dot' or 'average'"
+        }
+    )
+
+    heads:int=field(
+        default=8,
+        metadata={
+            "help": "Number of heads for transformer self-attention"
+        }
+    )
+
+    transformer_ff:int=field(
+        default=2048,
+        metadata={
+            "help": "Size of hidden transformer feed-forward"
+        }
+    )
+
+    dropout:float=field(
+        default=0.1,
+        metadata={
+            "help": "Dropout probability; applied in LSTM stacks."
+        }
+    )
+
+def save_checkpoint(model, epoch, save_dir):
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    save_path = os.path.join(save_dir, "checkpoint%d.pt"%epoch)
+    state_dict = {
+        'model': model.state_dict()
+    }
+    torch.save(state_dict, save_path)
+
+def model_forward(model, criterion, seq1, seq2, seq1_length, label, g_label, padding_idx):
+    # seq1经过encoder0, seq2经过encoder1, 预测seq2的结果
+    output1 = model(seq1, seq2, seq1_length)[0]
+    pred = model.generator(output1)
+    # 非padding为1, padding为0
+    pred_mask = (~(seq2.eq(padding_idx))).to(torch.float)
+    # 排除掉padding的预测结果
+    pred = pred * pred_mask.unsqueeze(-1)
+    ntokens = torch.sum(pred_mask).item()
+    # 计算平均loss
+    loss = criterion(label, pred[:,:,0]) / ntokens
+    g_loss = criterion(g_label, pred[:,:,1]) / ntokens
+
+    # 计算预测准确率
+    label_round = torch.round(label)
+    pred_round = torch.round(pred[:,:,0])
+    correct_ntokens = torch.sum((label_round == pred_round) * pred_mask, dtype=torch.long).item()
+
+    return loss, g_loss, correct_ntokens, ntokens, pred_round, pred_mask
+
+def do_test(model, criterion, test_dataloader, device, padding_idx, result_file="align.txt"):
+
+    def _get_alignments(seq, length, pred):
+        seq = seq.cpu()
+        length = length.cpu()
+        pred = pred.cpu()
+        align_list = list()
+        for i, pred_single in enumerate(pred):
+            align_str = ""
+            p = pred_single[:length[i]]
+            seq_ids_without_padding = seq[i][:length[i]-1].tolist()
+            tokens = model.encoder.embeddings.tokenizer.convert_ids_to_tokens(seq_ids_without_padding)
+            tokens = list(map(lambda ch: ch.lstrip('▁'), tokens))
+            # BUGFIX: should use round
+            for j, token in enumerate(tokens):
+                freq = round(p[j].item())
+                align_str = align_str + "-" * freq + token
+            freq = round(p[-1].item()) # last
+            align_str += "-" * freq
+            align_list.append(align_str)
+        return align_list
+
+    logger.info("Train End. Running test.")
+    model.eval()
+    total_correct1 = 0
+    total_correct2 = 0
+    total_ntokens1 = 0
+    total_ntokens2 = 0
+    align_list1 = list()
+    align_list2 = list()
+    with torch.no_grad():
+        for test_data in tqdm(test_dataloader):
+            seq1 = test_data["seq1"].to(device)
+            seq2 = test_data["seq2"].to(device)
+            length1 = test_data["length1"].to(device)
+            length2 = test_data["length2"].to(device)
+            label1 = test_data["label1"].to(device)
+            label2 = test_data["label2"].to(device)
+            g_label1 = test_data["g_label1"].to(device)
+            g_label2 = test_data["g_label2"].to(device)
+            # 预测seq2对应的label
+            _, _, correct1, ntokens1, pred1, pred_mask1 = model_forward(model, criterion, seq1, seq2, length1, label2, g_label2, padding_idx)
+            # 预测seq1对应的label
+            _, _, correct2, ntokens2, pred2, pred_mask2 = model_forward(model, criterion, seq2, seq1, length2, label1, g_label1, padding_idx)
+            total_correct1 += correct1
+            total_correct2 += correct2
+            total_ntokens1 += ntokens1
+            total_ntokens2 += ntokens2
+
+            # 序列1的对齐信息
+            _align_list1 = _get_alignments(seq1, length1, pred2)
+            # 序列2的对齐信息
+            _align_list2 = _get_alignments(seq2, length2, pred1)
+            align_list1.extend(_align_list1)
+            align_list2.extend(_align_list2)
+        f = open(result_file, "a")
+        for s1, s2 in zip(align_list1, align_list2):
+            s1 = s1.lstrip("-")
+            s2 = s2.lstrip("-")
+            max_len = max(len(s1), len(s2))
+            if len(s1) < max_len:
+                s1 = s1 + "-" * (max_len-len(s1))
+            if len(s2) < max_len:
+                s2 = s2 + "-" * (max_len-len(s2))
+            result_s1 = ""
+            result_s2 = ""
+            for a, b in zip(s1, s2):
+                if a == "-" and b == "-":
+                    continue
+                result_s1 += a
+                result_s2 += b
+            f.write(result_s1 + "\t" + result_s2 + "\n")
+        f.close()
+
+        logger.info(f'''Test Acc1: {1.0 * total_correct1 / total_ntokens1: .3f} Test Acc2: {1.0 * total_correct2 / total_ntokens2: .3f}''')
+    model.train()
+
+if __name__ == '__main__':
+    # 初始化logger
+    init_logger()
+    model = build_model(ModelConfig())
+    test_dataloader = build_data_iter(["data/test_0.txt", "data/test_1.txt"], data_type="test", batch_size=128, shuffle=False)
+    # test_dataloader = build_data_iter(["data/z0.txt", "data/z1.txt"], data_type="test", batch_size=32, shuffle=False)
+    use_cuda = torch.cuda.is_available()
+    device = torch.device("cuda" if use_cuda else "cpu")
+    criterion = torch.nn.MSELoss(reduction="sum")
+    model = model.cuda()
+    criterion = criterion.cuda()
+    state_dict = torch.load("checkpoints/checkpoint28.pt")
+    model.load_state_dict(state_dict["model"])
+    padding_idx = model.encoder.padding_idx
+    do_test(model, criterion, test_dataloader, device, padding_idx, result_file="align.txt")

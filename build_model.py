@@ -60,8 +60,8 @@ def build_decoder(opt, embeddings):
                               opt.dropout, embeddings)
 
 def build_embeddings():
-    embedding = T5EncoderModel.from_pretrained("Rostlab/prot_t5_xl_half_uniref50-enc")
-    tokenizer = T5Tokenizer.from_pretrained('Rostlab/prot_t5_xl_half_uniref50-enc', do_lower_case=False)
+    embedding = T5EncoderModel.from_pretrained("Rostlab/prot_t5_xl_half_uniref50-enc", cache_dir="/data/hxdou/models")
+    tokenizer = T5Tokenizer.from_pretrained('Rostlab/prot_t5_xl_half_uniref50-enc', cache_dir="/data/hxdou/models", do_lower_case=False)
     embedding.tokenizer =tokenizer
     return embedding
 
